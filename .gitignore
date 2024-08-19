@@ -1,0 +1,11 @@
+# Ignore virtual environment folder
+.venv/
+
+# Ignore original photos folder
+Photos-001/
+
+# Ignore preprocessed photos folder
+Preprocessed-Photos/
+
+# Ignore the final output folder
+Generated-Images/
