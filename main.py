@@ -1,148 +1,141 @@
 import tensorflow as tf
 import numpy as np
 import os
-import random
 from PIL import Image
+import random
 
 # Parameters
-image_size = 256
-batch_size = 1
-epochs = 50
+image_size = 128
+batch_size = 8
+epochs = 5
 image_folder = 'Preprocessed-Photos'
-num_diffusion_steps = 256  # Number of diffusion steps (T)
-beta_start = 0.0001
-beta_end = 0.02
-buffer_size = 512  # Number of images to pre-load
-save_interval = 10  # Save image after this many steps
-output_folder = 'Generated-Images'  # Folder to save generated images
-
-# Model architecture parameters
-encoder_layers = 5         # Number of layers in the encoder
-decoder_layers = 5         # Number of layers in the decoder
-initial_filters = 128       # Number of filters in the first layer
-filter_growth = 2          # Growth factor for filters in deeper layers (e.g., double the filters with each layer)
-dense_units = 64         # Number of units in the dense layer before the decoder
-use_batchnorm = True       # Whether to use batch normalization
+save_interval = 100
+output_folder = 'Generated-Images'
+buffer_size = 32  # Number of images to load at a time
 
 # Load and preprocess a single image
 def load_and_preprocess_image(file_path):
     image = tf.io.read_file(file_path)
     image = tf.image.decode_jpeg(image, channels=3)
     image = tf.image.resize_with_crop_or_pad(image, image_size, image_size)
-    image = tf.cast(image, tf.float32) / 255.0  # Normalize to [0, 1]
+    image = tf.cast(image, tf.float32) / 255.0
     return image
 
-# Custom generator function for loading images dynamically
-def dynamic_image_loader(file_paths, buffer_size):
-    while True:
-        random.shuffle(file_paths)  # Shuffle file paths
-        for i in range(0, len(file_paths), buffer_size):
-            batch_files = file_paths[i:i + buffer_size]
-            images = [load_and_preprocess_image(file) for file in batch_files]
-            images = tf.stack(images)
-            for j in range(0, len(images), batch_size):
-                yield images[j:j + batch_size]
-
-# Create dataset
-def create_dynamic_dataset(image_folder, buffer_size):
-    file_paths = [os.path.join(image_folder, fname) for fname in os.listdir(image_folder) if fname.endswith('.jpg')]
-    dataset = tf.data.Dataset.from_generator(
-        lambda: dynamic_image_loader(file_paths, buffer_size),
-        output_signature=tf.TensorSpec(shape=(None, image_size, image_size, 3), dtype=tf.float32)
-    )
-    dataset = dataset.prefetch(buffer_size=tf.data.AUTOTUNE)
-    return dataset
-
-# Diffusion utilities
-def get_beta_schedule(num_diffusion_steps, beta_start, beta_end):
-    return np.linspace(beta_start, beta_end, num_diffusion_steps, dtype=np.float32)
-
-def q_sample(x_start, t, noise, alphas_bar_sqrt):
-    alphas_bar_sqrt_t = tf.reshape(alphas_bar_sqrt[t], (-1, 1, 1, 1))
-    one_minus_alphas_bar_sqrt_t = tf.reshape(1 - alphas_bar_sqrt[t], (-1, 1, 1, 1))
-    return alphas_bar_sqrt_t * x_start + one_minus_alphas_bar_sqrt_t * noise
-
-def save_image(image_tensor, step):
-    image_array = image_tensor.numpy() * 255.0  # Convert to [0, 255]
-    image_array = np.clip(image_array, 0, 255).astype(np.uint8)
-    image_pil = Image.fromarray(image_array)
+# Save image function
+def save_image(image_array, step_count):
+    image_pil = Image.fromarray((image_array * 255).astype(np.uint8))
     if not os.path.exists(output_folder):
         os.makedirs(output_folder)
-    image_pil.save(os.path.join(output_folder, f'step_{step}.png'))
+    image_pil.save(os.path.join(output_folder, f'swap_{step_count}.png'))
 
-class DiffusionModel(tf.keras.Model):
-    def __init__(self, encoder_layers, decoder_layers, initial_filters, filter_growth, dense_units, use_batchnorm):
-        super(DiffusionModel, self).__init__()
-
-        # Encoder
-        self.encoder = tf.keras.Sequential()
-        filters = initial_filters
-        for i in range(encoder_layers):
-            self.encoder.add(tf.keras.layers.Conv2D(filters, (3, 3), padding='same', activation='relu'))
-            if use_batchnorm:
-                self.encoder.add(tf.keras.layers.BatchNormalization())
-            self.encoder.add(tf.keras.layers.LeakyReLU())
-            if i < encoder_layers - 1:
-                self.encoder.add(tf.keras.layers.Conv2D(filters, (3, 3), strides=(2, 2), padding='same', activation='relu'))
-                filters *= filter_growth
-
-        self.encoder.add(tf.keras.layers.Flatten())
-        self.encoder.add(tf.keras.layers.Dense(dense_units, activation='relu'))
-
-        # Decoder
-        self.decoder = tf.keras.Sequential()
-        self.decoder.add(tf.keras.layers.Dense((image_size // (2 ** (encoder_layers - 1))) * (image_size // (2 ** (encoder_layers - 1))) * filters, activation='relu'))
-        self.decoder.add(tf.keras.layers.Reshape(((image_size // (2 ** (encoder_layers - 1))), (image_size // (2 ** (encoder_layers - 1))), filters)))
-
-        for i in range(decoder_layers):
-            if i < decoder_layers - 1:
-                self.decoder.add(tf.keras.layers.UpSampling2D((2, 2)))
-            filters //= filter_growth
-            self.decoder.add(tf.keras.layers.Conv2D(filters, (3, 3), padding='same', activation='relu'))
-            if use_batchnorm:
-                self.decoder.add(tf.keras.layers.BatchNormalization())
-            self.decoder.add(tf.keras.layers.LeakyReLU())
-
-        self.decoder.add(tf.keras.layers.Conv2D(3, (3, 3), padding='same', activation='sigmoid'))  # 256x256x3 output
+# Define the model
+class PixelPredictor(tf.keras.Model):
+    def __init__(self, num_layers=3, num_filters=[64, 128, 64], activation='relu'):
+        super(PixelPredictor, self).__init__()
+        self.conv_layers = []
+        for i in range(num_layers):
+            self.conv_layers.append(
+                tf.keras.layers.Conv2D(
+                    num_filters[i], (3, 3), activation=activation, padding='same'
+                )
+            )
+        self.flatten = tf.keras.layers.Flatten()
+        self.dense1 = tf.keras.layers.Dense(512, activation=activation)
+        self.dense2 = tf.keras.layers.Dense(3, activation='sigmoid')
 
     def call(self, inputs):
-        x_t, t = inputs
-        encoded = self.encoder(x_t)
-        decoded = self.decoder(encoded)
-        return decoded
+        x = inputs
+        for conv_layer in self.conv_layers:
+            x = conv_layer(x)
+        x = self.flatten(x)
+        x = self.dense1(x)
+        return self.dense2(x)
 
-# Training
-def train_model(model, dataset, epochs, num_diffusion_steps, betas, alphas_bar_sqrt):
-    optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
-    loss_fn = tf.keras.losses.MeanSquaredError()
+def predict_pixel_value(image, model):
+    image_tensor = tf.convert_to_tensor(image[None, ...], dtype=tf.float32)
+    predicted_pixel = model(image_tensor)
+    return predicted_pixel.numpy()[0]
 
-    step_count = 0  # Initialize step counter
+# Training function
+def train_pixel_predictor(model, image_paths, epochs, optimizer, loss_fn):
+    num_images = len(image_paths)
     for epoch in range(epochs):
-        print(f'Epoch {epoch + 1}/{epochs}')
-        for step, x_start in enumerate(dataset):
-            batch_size = tf.shape(x_start)[0]
-            t = tf.random.uniform((batch_size,), minval=0, maxval=num_diffusion_steps, dtype=tf.int32)
-            noise = tf.random.normal(shape=x_start.shape)
-            x_t = q_sample(x_start, t, noise, alphas_bar_sqrt)
-            
+        print(f'Starting epoch {epoch + 1}/{epochs}')
+        random.shuffle(image_paths)  # Shuffle images for each epoch
+        
+        # Batch processing
+        for start in range(0, num_images, batch_size):
+            end = min(start + batch_size, num_images)
+            batch_paths = image_paths[start:end]
+            images, targets = load_batch(batch_paths)
+
+            images = tf.convert_to_tensor(images, dtype=tf.float32)
+            targets = tf.convert_to_tensor(targets, dtype=tf.float32)
+
             with tf.GradientTape() as tape:
-                x_t_pred = model([x_t, t])
-                loss = loss_fn(noise, x_t_pred)
+                predictions = model(images)
+                print('Predictions:', predictions)
+                print('Targets:', targets)
+                loss = loss_fn(targets, predictions)
             gradients = tape.gradient(loss, model.trainable_variables)
             optimizer.apply_gradients(zip(gradients, model.trainable_variables))
-            
-            if step % save_interval == 0:
-                print(f'Step {step}, Loss: {loss.numpy()}')
-                save_image(x_t_pred[0], step_count)  # Save generated image
-            step_count += 1
+
+            print(f'Step {start // batch_size}: Loss = {loss.numpy()}')
+
+def load_batch(file_paths):
+    images = []
+    targets = []
+    for file_path in file_paths:
+        image = load_and_preprocess_image(file_path)
+        height, width, _ = image.shape
+        i, j = random.randint(0, height - 1), random.randint(0, width - 1)
+        target_pixel = image[i, j]
+        image = tf.tensor_scatter_nd_update(image, [[i, j]], [[0.0, 0.0, 0.0]])
+        images.append(image)
+        targets.append(target_pixel)
+    return np.array(images), np.array(targets)
+
+def swap_and_fill_pixels(image, model):
+    height, width, _ = image.shape
+    all_pixels = [(i, j) for i in range(height) for j in range(width)]
+    random.shuffle(all_pixels)
+
+    step_count = 0
+    for i, j in all_pixels:
+        # Temporarily remove pixel (set it to black or another placeholder)
+        indices = tf.constant([[i, j]], dtype=tf.int32)
+        new_image = tf.tensor_scatter_nd_update(image, indices, [[0.0, 0.0, 0.0]])
+
+        # Predict and fill in the pixel's new value
+        new_pixel_value = predict_pixel_value(new_image, model)
+        new_image = tf.tensor_scatter_nd_update(new_image, indices, [new_pixel_value])
+
+        # Update the image with the new pixel value
+        image = new_image
+
+        step_count += 1
+        if step_count % save_interval == 0:
+            save_image(image.numpy(), step_count)
+
+    # Save the final image
+    save_image(image.numpy(), step_count)
 
 
 # Main script
-betas = get_beta_schedule(num_diffusion_steps, beta_start, beta_end)
-alphas = 1.0 - betas
-alphas_bar = np.cumprod(alphas, axis=0)
-alphas_bar_sqrt = np.sqrt(alphas_bar)
+if __name__ == '__main__':
+    model = PixelPredictor()
+    optimizer = tf.keras.optimizers.Adam(learning_rate=1e-4)
+    loss_fn = tf.keras.losses.MeanSquaredError()
 
-dataset = create_dynamic_dataset(image_folder, buffer_size)
-model = DiffusionModel(encoder_layers, decoder_layers, initial_filters, filter_growth, dense_units, use_batchnorm)
-train_model(model, dataset, epochs, num_diffusion_steps, betas, alphas_bar_sqrt)
+    file_paths = [os.path.join(image_folder, fname) for fname in os.listdir(image_folder) if fname.endswith('.jpg')]
+
+    while True:
+        # Training loop
+        train_pixel_predictor(model, file_paths, epochs, optimizer, loss_fn)
+
+        # Generate images by swapping and filling pixels
+        for image_file in file_paths:
+            if image_file.endswith('.jpg'):
+                image_path = os.path.join(image_folder, image_file)
+                image = load_and_preprocess_image(image_path)
+                swap_and_fill_pixels(image, model)

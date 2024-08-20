@@ -3,7 +3,7 @@ import os
 import shutil
 
 # Parameters
-image_size = 256
+image_size = 128
 source_folder = 'Photos-001'
 preprocessed_folder = 'Preprocessed-Photos'
 
