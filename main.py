@@ -6,10 +6,10 @@ import random
 
 # Parameters
 image_size = 128
-batch_size = 8
+batch_size = 32
 epochs = 5
 image_folder = 'Preprocessed-Photos'
-save_interval = 100
+save_interval = 1000
 output_folder = 'Generated-Images'
 buffer_size = 32  # Number of images to load at a time
 
@@ -28,10 +28,11 @@ def save_image(image_array, step_count):
         os.makedirs(output_folder)
     image_pil.save(os.path.join(output_folder, f'swap_{step_count}.png'))
 
-# Define the model
 class PixelPredictor(tf.keras.Model):
-    def __init__(self, num_layers=3, num_filters=[64, 128, 64], activation='relu'):
+    def __init__(self, num_layers=3, num_filters=[64, 128, 64], activation='relu', dense_units=512, num_dense_layers=2):
         super(PixelPredictor, self).__init__()
+        
+        # Initialize convolutional layers
         self.conv_layers = []
         for i in range(num_layers):
             self.conv_layers.append(
@@ -39,17 +40,33 @@ class PixelPredictor(tf.keras.Model):
                     num_filters[i], (3, 3), activation=activation, padding='same'
                 )
             )
+        
         self.flatten = tf.keras.layers.Flatten()
-        self.dense1 = tf.keras.layers.Dense(512, activation=activation)
-        self.dense2 = tf.keras.layers.Dense(3, activation='sigmoid')
+        
+        # Initialize dense layers
+        self.dense_layers = []
+        for i in range(num_dense_layers):
+            self.dense_layers.append(
+                tf.keras.layers.Dense(dense_units, activation=activation)
+            )
+        
+        self.output_layer = tf.keras.layers.Dense(3, activation='sigmoid')
 
     def call(self, inputs):
         x = inputs
+        
+        # Apply convolutional layers
         for conv_layer in self.conv_layers:
             x = conv_layer(x)
+        
         x = self.flatten(x)
-        x = self.dense1(x)
-        return self.dense2(x)
+        
+        # Apply dense layers
+        for dense_layer in self.dense_layers:
+            x = dense_layer(x)
+        
+        # Apply the output layer
+        return self.output_layer(x)
 
 def predict_pixel_value(image, model):
     image_tensor = tf.convert_to_tensor(image[None, ...], dtype=tf.float32)
@@ -74,8 +91,8 @@ def train_pixel_predictor(model, image_paths, epochs, optimizer, loss_fn):
 
             with tf.GradientTape() as tape:
                 predictions = model(images)
-                print('Predictions:', predictions)
-                print('Targets:', targets)
+                # print('Predictions:', predictions)
+                # print('Targets:', targets)
                 loss = loss_fn(targets, predictions)
             gradients = tape.gradient(loss, model.trainable_variables)
             optimizer.apply_gradients(zip(gradients, model.trainable_variables))
@@ -123,7 +140,7 @@ def swap_and_fill_pixels(image, model):
 
 # Main script
 if __name__ == '__main__':
-    model = PixelPredictor()
+    model = PixelPredictor(num_layers=5 , num_filters=[64, 128, 256, 128, 64], activation='relu', dense_units=512, num_dense_layers=3)
     optimizer = tf.keras.optimizers.Adam(learning_rate=1e-4)
     loss_fn = tf.keras.losses.MeanSquaredError()
 
@@ -134,8 +151,7 @@ if __name__ == '__main__':
         train_pixel_predictor(model, file_paths, epochs, optimizer, loss_fn)
 
         # Generate images by swapping and filling pixels
-        for image_file in file_paths:
-            if image_file.endswith('.jpg'):
-                image_path = os.path.join(image_folder, image_file)
-                image = load_and_preprocess_image(image_path)
-                swap_and_fill_pixels(image, model)
+        image_file = random.choice(file_paths)
+        if image_file.endswith('.jpg'):
+            image = load_and_preprocess_image(image_file)
+            swap_and_fill_pixels(image, model)
